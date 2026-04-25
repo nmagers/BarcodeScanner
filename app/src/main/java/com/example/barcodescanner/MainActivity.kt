@@ -6,7 +6,6 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +14,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -25,34 +23,23 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.QrCodeScanner
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -98,8 +85,11 @@ class MainActivity : ComponentActivity() {
                     return@addOnSuccessListener
                 }
                 viewModel.add(value, formatName(barcode.format))
+                toast("Saved: $value")
             }
-            .addOnCanceledListener { /* user backed out */ }
+            .addOnCanceledListener {
+                // User backed out — no toast needed
+            }
             .addOnFailureListener { e ->
                 toast("Scan failed: ${e.localizedMessage ?: e.javaClass.simpleName}")
             }
@@ -143,26 +133,6 @@ private fun AppScreen(
 ) {
     val entries by viewModel.entries.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
-
-    // Which entry is currently being edited, if any.
-    var editing by remember { mutableStateOf<BarcodeEntry?>(null) }
-    // A pending duplicate confirmation, if any.
-    var duplicatePrompt by remember { mutableStateOf<ScanEvent.DuplicatePrompt?>(null) }
-
-    // Surface ScanEvents from the VM. Toasts for saved/error, a dialog for duplicates.
-    LaunchedEffect(Unit) {
-        viewModel.events.collect { event ->
-            when (event) {
-                is ScanEvent.Saved ->
-                    Toast.makeText(context, "Saved: ${event.value}", Toast.LENGTH_SHORT).show()
-                is ScanEvent.DuplicatePrompt ->
-                    duplicatePrompt = event
-                is ScanEvent.Error ->
-                    Toast.makeText(context, event.message, Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
 
     Scaffold(
         topBar = {
@@ -202,37 +172,10 @@ private fun AppScreen(
                 items(entries, key = { it.id }) { entry ->
                     EntryCard(
                         entry = entry,
-                        onClick = { editing = entry },
                         onDelete = { viewModel.delete(entry) }
                     )
                 }
             }
-        }
-
-        editing?.let { entry ->
-            // Keep the dialog bound to the latest version of this entry from the
-            // flow (so a concurrent product lookup updating the row doesn't get
-            // silently reverted when the user hits Save).
-            val current = entries.firstOrNull { it.id == entry.id } ?: entry
-            EditEntryDialog(
-                entry = current,
-                onDismiss = { editing = null },
-                onSave = { name, size, unit ->
-                    viewModel.updateEntry(current.id, name, size, unit)
-                    editing = null
-                }
-            )
-        }
-
-        duplicatePrompt?.let { prompt ->
-            DuplicateDialog(
-                prompt = prompt,
-                onKeep = { duplicatePrompt = null },
-                onReplace = {
-                    viewModel.replaceDuplicate(prompt.existing, prompt.value, prompt.format)
-                    duplicatePrompt = null
-                }
-            )
         }
     }
 }
@@ -263,15 +206,9 @@ private fun EmptyState(padding: PaddingValues) {
 }
 
 @Composable
-private fun EntryCard(
-    entry: BarcodeEntry,
-    onClick: () -> Unit,
-    onDelete: () -> Unit
-) {
+private fun EntryCard(entry: BarcodeEntry, onDelete: () -> Unit) {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth(),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
@@ -288,10 +225,9 @@ private fun EntryCard(
                         fontWeight = FontWeight.SemiBold
                     )
                 )
-                ProductLine(entry)
-                Spacer(Modifier.size(2.dp))
+                Spacer(Modifier.size(4.dp))
                 Text(
-                    text = metaLine(entry),
+                    text = "${entry.format} · ${formatTimestamp(entry.scannedAt)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -303,196 +239,8 @@ private fun EntryCard(
     }
 }
 
-/** Shows product name + size, a "Looking up…" placeholder while lookup is in flight, or nothing. */
-@Composable
-private fun ProductLine(entry: BarcodeEntry) {
-    val name = entry.productName
-    val size = entry.productSize
-    val hasInfo = !name.isNullOrBlank() || !size.isNullOrBlank()
-    val canLookup = ProductLookup.supportsLookup(entry.format)
-
-    when {
-        hasInfo -> {
-            Spacer(Modifier.size(4.dp))
-            val label = listOfNotNull(
-                name?.takeIf { it.isNotBlank() },
-                size?.takeIf { it.isNotBlank() }?.let { "($it)" }
-            ).joinToString(" ")
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
-        canLookup -> {
-            Spacer(Modifier.size(4.dp))
-            Text(
-                text = "Looking up product…",
-                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-/** Bottom metadata line: "FORMAT · Unit · timestamp" (unit omitted if default). */
-private fun metaLine(entry: BarcodeEntry): String {
-    val parts = listOfNotNull(
-        entry.format,
-        entry.unit.takeIf { it != DEFAULT_UNIT },
-        tsFormat.format(Date(entry.scannedAt))
-    )
-    return parts.joinToString(" · ")
-}
-
-// ---------------------------------------------------------------------------
-// Edit dialog
-// ---------------------------------------------------------------------------
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun EditEntryDialog(
-    entry: BarcodeEntry,
-    onDismiss: () -> Unit,
-    onSave: (name: String, size: String, unit: String) -> Unit
-) {
-    var name by remember(entry.id) { mutableStateOf(entry.productName.orEmpty()) }
-    var size by remember(entry.id) { mutableStateOf(entry.productSize.orEmpty()) }
-    var unit by remember(entry.id) { mutableStateOf(entry.unit) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Edit product") },
-        text = {
-            Column {
-                Text(
-                    text = entry.value,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = size,
-                    onValueChange = { size = it },
-                    label = { Text("Size") },
-                    singleLine = true,
-                    placeholder = { Text("e.g. 330 mL, 500 g") },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(8.dp))
-                UnitDropdown(selected = unit, onChange = { unit = it })
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(name, size, unit) }) { Text("Save") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
-@Composable
-private fun DuplicateDialog(
-    prompt: ScanEvent.DuplicatePrompt,
-    onKeep: () -> Unit,
-    onReplace: () -> Unit
-) {
-    val existing = prompt.existing
-    val productLine = listOfNotNull(
-        existing.productName?.takeIf { it.isNotBlank() },
-        existing.productSize?.takeIf { it.isNotBlank() }?.let { "($it)" }
-    ).joinToString(" ").takeIf { it.isNotBlank() }
-
-    AlertDialog(
-        onDismissRequest = onKeep,
-        title = { Text("Already scanned") },
-        text = {
-            Column {
-                Text(
-                    text = prompt.value,
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                )
-                if (productLine != null) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(productLine, style = MaterialTheme.typography.bodyMedium)
-                }
-                Spacer(Modifier.height(4.dp))
-                val meta = listOfNotNull(
-                    existing.unit.takeIf { it != DEFAULT_UNIT },
-                    "scanned ${tsFormat.format(Date(existing.scannedAt))}"
-                ).joinToString(" · ")
-                Text(
-                    text = meta,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    "Keep the existing record, or replace it with a fresh scan?",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        },
-        // Keep existing is the safe default — put it on the right as the confirm button.
-        confirmButton = {
-            TextButton(onClick = onKeep) { Text("Keep existing") }
-        },
-        dismissButton = {
-            TextButton(onClick = onReplace) { Text("Replace") }
-        }
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun UnitDropdown(selected: String, onChange: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = !expanded }
-    ) {
-        OutlinedTextField(
-            value = selected,
-            onValueChange = {},
-            readOnly = true,
-            label = { Text("Unit") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor()
-        )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false }
-        ) {
-            UNIT_OPTIONS.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(option) },
-                    onClick = {
-                        onChange(option)
-                        expanded = false
-                    }
-                )
-            }
-        }
-    }
-}
-
 private val tsFormat = SimpleDateFormat("d MMM yyyy, HH:mm:ss", Locale.getDefault())
+private fun formatTimestamp(millis: Long): String = tsFormat.format(Date(millis))
 
 /** Map ML Kit's format constant to a human-readable name stored in the CSV. */
 internal fun formatName(format: Int): String = when (format) {
