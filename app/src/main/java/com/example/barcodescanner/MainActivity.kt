@@ -21,10 +21,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -52,7 +57,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -145,17 +149,18 @@ private fun AppScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // Which entry is currently being edited, if any.
     var editing by remember { mutableStateOf<BarcodeEntry?>(null) }
-    // A pending duplicate confirmation, if any.
     var duplicatePrompt by remember { mutableStateOf<ScanEvent.DuplicatePrompt?>(null) }
+    var unknownPrompt by remember { mutableStateOf<ScanEvent.UnknownBarcode?>(null) }
+    var addVariantFor by remember { mutableStateOf<BarcodeEntry?>(null) }
 
-    // Surface ScanEvents from the VM. Toasts for saved/error, a dialog for duplicates.
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
             when (event) {
                 is ScanEvent.Saved ->
                     Toast.makeText(context, "Saved: ${event.value}", Toast.LENGTH_SHORT).show()
+                is ScanEvent.UnknownBarcode ->
+                    unknownPrompt = event
                 is ScanEvent.DuplicatePrompt ->
                     duplicatePrompt = event
                 is ScanEvent.Error ->
@@ -203,6 +208,7 @@ private fun AppScreen(
                     EntryCard(
                         entry = entry,
                         onClick = { editing = entry },
+                        onAddVariant = { addVariantFor = entry },
                         onDelete = { viewModel.delete(entry) }
                     )
                 }
@@ -217,8 +223,8 @@ private fun AppScreen(
             EditEntryDialog(
                 entry = current,
                 onDismiss = { editing = null },
-                onSave = { name, size, unit ->
-                    viewModel.updateEntry(current.id, name, size, unit)
+                onSave = { name, size, unit, quantity ->
+                    viewModel.updateEntry(current.id, name, size, unit, quantity)
                     editing = null
                 }
             )
@@ -229,8 +235,34 @@ private fun AppScreen(
                 prompt = prompt,
                 onKeep = { duplicatePrompt = null },
                 onReplace = {
-                    viewModel.replaceDuplicate(prompt.existing, prompt.value, prompt.format)
+                    viewModel.replaceDuplicate(prompt.existing, prompt.replacement)
                     duplicatePrompt = null
+                }
+            )
+        }
+
+        unknownPrompt?.let { prompt ->
+            ProductDetailDialog(
+                title = "Unknown barcode",
+                subtitle = "Not in price list — enter details or save blank to flag for review.",
+                onDismiss = { unknownPrompt = null },
+                onSave = { name, price, unit, quantity ->
+                    viewModel.saveUnknown(prompt.value, prompt.format, name, price, unit, quantity)
+                    unknownPrompt = null
+                }
+            )
+        }
+
+        addVariantFor?.let { source ->
+            ProductDetailDialog(
+                title = "Add variant",
+                subtitle = "Same product, different type or quantity.",
+                initialName = source.productName.orEmpty(),
+                initialPrice = source.price.orEmpty(),
+                onDismiss = { addVariantFor = null },
+                onSave = { name, price, unit, quantity ->
+                    viewModel.addVariant(source, name, price, unit, quantity)
+                    addVariantFor = null
                 }
             )
         }
@@ -266,6 +298,7 @@ private fun EmptyState(padding: PaddingValues) {
 private fun EntryCard(
     entry: BarcodeEntry,
     onClick: () -> Unit,
+    onAddVariant: () -> Unit,
     onDelete: () -> Unit
 ) {
     Card(
@@ -281,13 +314,24 @@ private fun EntryCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = entry.value,
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.SemiBold
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = entry.value,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     )
-                )
+                    if (entry.needsReview) {
+                        Spacer(Modifier.size(6.dp))
+                        Icon(
+                            Icons.Filled.Flag,
+                            contentDescription = "Needs review",
+                            modifier = Modifier.size(14.dp),
+                            tint = Color(0xFFF59E0B)
+                        )
+                    }
+                }
                 ProductLine(entry)
                 Spacer(Modifier.size(2.dp))
                 Text(
@@ -296,6 +340,9 @@ private fun EntryCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            IconButton(onClick = onAddVariant) {
+                Icon(Icons.Filled.Add, contentDescription = "Add variant")
+            }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Filled.Delete, contentDescription = "Delete")
             }
@@ -303,46 +350,26 @@ private fun EntryCard(
     }
 }
 
-/** Shows product name + size, a "Looking up…" placeholder while lookup is in flight, or nothing. */
 @Composable
 private fun ProductLine(entry: BarcodeEntry) {
-    val name = entry.productName
-    val size = entry.productSize
-    val hasInfo = !name.isNullOrBlank() || !size.isNullOrBlank()
-    val canLookup = ProductLookup.supportsLookup(entry.format)
-
-    when {
-        hasInfo -> {
-            Spacer(Modifier.size(4.dp))
-            val label = listOfNotNull(
-                name?.takeIf { it.isNotBlank() },
-                size?.takeIf { it.isNotBlank() }?.let { "($it)" }
-            ).joinToString(" ")
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
-        canLookup -> {
-            Spacer(Modifier.size(4.dp))
-            Text(
-                text = "Looking up product…",
-                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
+    val label = listOfNotNull(
+        entry.productName?.takeIf { it.isNotBlank() },
+        entry.productSize?.takeIf { it.isNotBlank() }?.let { "($it)" },
+        entry.price?.takeIf { it.isNotBlank() }
+    ).joinToString("  ")
+    if (label.isEmpty()) return
+    Spacer(Modifier.size(4.dp))
+    Text(text = label, style = MaterialTheme.typography.bodyMedium)
 }
 
-/** Bottom metadata line: "FORMAT · Unit · timestamp" (unit omitted if default). */
+/** Bottom metadata line: "FORMAT · 6-pack ×3 · timestamp" */
 private fun metaLine(entry: BarcodeEntry): String {
-    val parts = listOfNotNull(
-        entry.format,
-        entry.unit.takeIf { it != DEFAULT_UNIT },
-        tsFormat.format(Date(entry.scannedAt))
-    )
-    return parts.joinToString(" · ")
+    val unitPart = when {
+        entry.quantity > 1 -> "${entry.unit} ×${entry.quantity}"
+        entry.unit != DEFAULT_UNIT -> entry.unit
+        else -> null
+    }
+    return listOfNotNull(entry.format, unitPart, tsFormat.format(Date(entry.scannedAt))).joinToString(" · ")
 }
 
 // ---------------------------------------------------------------------------
@@ -354,11 +381,12 @@ private fun metaLine(entry: BarcodeEntry): String {
 private fun EditEntryDialog(
     entry: BarcodeEntry,
     onDismiss: () -> Unit,
-    onSave: (name: String, size: String, unit: String) -> Unit
+    onSave: (name: String, size: String, unit: String, quantity: Int) -> Unit
 ) {
     var name by remember(entry.id) { mutableStateOf(entry.productName.orEmpty()) }
     var size by remember(entry.id) { mutableStateOf(entry.productSize.orEmpty()) }
     var unit by remember(entry.id) { mutableStateOf(entry.unit) }
+    var quantityText by remember(entry.id) { mutableStateOf(entry.quantity.toString()) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -367,9 +395,7 @@ private fun EditEntryDialog(
             Column {
                 Text(
                     text = entry.value,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(Modifier.height(12.dp))
@@ -390,11 +416,91 @@ private fun EditEntryDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = quantityText,
+                    onValueChange = { quantityText = it.filter { c -> c.isDigit() } },
+                    label = { Text("Total amount") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
                 UnitDropdown(selected = unit, onChange = { unit = it })
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(name, size, unit) }) { Text("Save") }
+            TextButton(onClick = {
+                val qty = quantityText.toIntOrNull()?.coerceAtLeast(1) ?: 1
+                onSave(name, size, unit, qty)
+            }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ProductDetailDialog(
+    title: String,
+    subtitle: String,
+    initialName: String = "",
+    initialPrice: String = "",
+    initialUnit: String = DEFAULT_UNIT,
+    initialQuantity: Int = 1,
+    onDismiss: () -> Unit,
+    onSave: (name: String, price: String, unit: String, quantity: Int) -> Unit
+) {
+    var name by remember { mutableStateOf(initialName) }
+    var price by remember { mutableStateOf(initialPrice) }
+    var unit by remember { mutableStateOf(initialUnit) }
+    var quantityText by remember { mutableStateOf(initialQuantity.toString()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = price,
+                    onValueChange = { price = it },
+                    label = { Text("Price") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = quantityText,
+                    onValueChange = { quantityText = it.filter { c -> c.isDigit() } },
+                    label = { Text("Total amount") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(8.dp))
+                UnitDropdown(selected = unit, onChange = { unit = it })
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val qty = quantityText.toIntOrNull()?.coerceAtLeast(1) ?: 1
+                onSave(name, price, unit, qty)
+            }) { Text("Save") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
@@ -411,16 +517,17 @@ private fun DuplicateDialog(
     val existing = prompt.existing
     val productLine = listOfNotNull(
         existing.productName?.takeIf { it.isNotBlank() },
-        existing.productSize?.takeIf { it.isNotBlank() }?.let { "($it)" }
-    ).joinToString(" ").takeIf { it.isNotBlank() }
+        existing.productSize?.takeIf { it.isNotBlank() }?.let { "($it)" },
+        existing.price?.takeIf { it.isNotBlank() }
+    ).joinToString("  ").takeIf { it.isNotBlank() }
 
     AlertDialog(
         onDismissRequest = onKeep,
-        title = { Text("Already scanned") },
+        title = { Text("Already recorded") },
         text = {
             Column {
                 Text(
-                    text = prompt.value,
+                    text = existing.value,
                     style = MaterialTheme.typography.bodyMedium.copy(
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.SemiBold
@@ -431,10 +538,7 @@ private fun DuplicateDialog(
                     Text(productLine, style = MaterialTheme.typography.bodyMedium)
                 }
                 Spacer(Modifier.height(4.dp))
-                val meta = listOfNotNull(
-                    existing.unit.takeIf { it != DEFAULT_UNIT },
-                    "scanned ${tsFormat.format(Date(existing.scannedAt))}"
-                ).joinToString(" · ")
+                val meta = metaLine(existing)
                 Text(
                     text = meta,
                     style = MaterialTheme.typography.bodySmall,
@@ -442,12 +546,11 @@ private fun DuplicateDialog(
                 )
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Keep the existing record, or replace it with a fresh scan?",
+                    "Keep the existing record, or replace it?",
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
         },
-        // Keep existing is the safe default — put it on the right as the confirm button.
         confirmButton = {
             TextButton(onClick = onKeep) { Text("Keep existing") }
         },

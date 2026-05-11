@@ -6,25 +6,20 @@ database you can export as CSV.
 ## Features
 
 - Scan any common barcode format (QR, EAN-13/8, UPC-A/E, Code 128/39/93, PDF417, Aztec, Data Matrix, ITF, Codabar)
-- **Automatic product lookup** for retail barcodes (EAN/UPC) via Open Food Facts and UPCitemdb — product name and size appear in the list and are saved to the CSV
-- **Tap to edit** — tap any row to open a dialog with editable Name and Size fields and a Unit dropdown (Single / Case / Block) for stocktaking
-- **Duplicate prevention** — the same barcode can't be recorded twice; re-scanning an existing code shows a toast with its known product
+- **Pricelist lookup** — scanned barcodes are matched against a bundled `pricelist.csv`; product name and price are filled in automatically when found
+- **Tap to edit** — tap any row to open a dialog with editable Name and Size fields and a Unit dropdown (Single / 4-pack / 6-pack / 10-pack / Case / Block) for stocktaking
+- **Duplicate prevention** — the same (barcode, unit) pair can't be recorded twice; re-scanning prompts to keep or replace the existing record
 - Results persist across app restarts (Room / SQLite)
 - Export the full list to a timestamped CSV file (`barcodes_YYYYMMDD_HHMMSS.csv`) and share it via email, Drive, Messages, etc.
 - Delete individual entries or clear everything
 
-## Product lookup
+## Pricelist lookup
 
-When you scan a numeric retail barcode (EAN-13, EAN-8, UPC-A, UPC-E, ITF), the
-app does a best-effort product lookup in the background:
-
-1. **Open Food Facts** (`world.openfoodfacts.org`) — free, no API key, excellent coverage for anything grocery/consumer-packaged. Queried first.
-2. **UPCitemdb trial** (`api.upcitemdb.com`) — free fallback with broader (non-food) coverage. Limited to 100 requests/day per IP; no key needed.
-
-The lookup runs after the scan is saved, so offline or unknown products don't
-block anything — the barcode is kept regardless and the product column stays
-empty. QR codes and arbitrary text barcodes skip lookup entirely (the concept
-doesn't apply).
+When you scan a barcode the app checks it against the bundled `app/src/main/assets/pricelist.csv`.
+If a match is found, the product name and price are filled in automatically and
+the scan is saved immediately. If there is no match, a dialog prompts you to
+enter the details manually; leaving the name blank saves the entry and flags it
+for review (yellow flag icon).
 
 ## How it works
 
@@ -148,14 +143,16 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 ## CSV format
 
 ```
-id,value,format,product,size,unit,scanned_at
-1,9310072001234,EAN_13,Vegemite,220g,Case,2026-04-17T14:22:05+10:00
-2,9300675020428,EAN_13,Bundaberg Ginger Beer,375 mL,Block,2026-04-17T14:22:48+10:00
-3,https://example.com,QR_CODE,,,Single,2026-04-17T14:23:12+10:00
+id,value,format,product,size,price,unit,quantity,needs_review,scanned_at
+1,9310072001234,EAN_13,Vegemite,220g,$3.50,Case,6,0,2026-04-17T14:22:05+10:00
+2,9300675020428,EAN_13,Bundaberg Ginger Beer,375 mL,$5.50,Single,1,0,2026-04-17T14:22:48+10:00
+3,https://example.com,QR_CODE,,,,Single,1,0,2026-04-17T14:23:12+10:00
 ```
 
-- `product` and `size` are empty when the lookup didn't find a match (and for non-retail barcodes)
-- `unit` defaults to `Single` and can be changed by tapping the row (options: Single, Case, Block)
+- `product`, `size`, and `price` are empty when the pricelist had no match (and for non-retail barcodes)
+- `unit` defaults to `Single`; options: Single, 4-pack, 6-pack, 10-pack, Case, Block
+- `quantity` is the total count (e.g. 6 cans in a 6-pack)
+- `needs_review` is `1` when the item was saved without a name and still needs to be identified
 - Fields containing commas, quotes, or newlines are wrapped in double quotes (RFC 4180 style)
 - Timestamps are ISO-8601 with the device's local timezone offset
 - UTF-8 encoded
@@ -176,9 +173,12 @@ BarcodeScanner/
         ├── java/com/example/barcodescanner/
         │   ├── MainActivity.kt       — Compose UI + scanner + share intent
         │   ├── MainViewModel.kt      — State + CSV writer
-        │   ├── BarcodeEntry.kt       — Room entity
-        │   ├── BarcodeDao.kt         — Room DAO
-        │   └── BarcodeDatabase.kt    — Room database
+        │   ├── BarcodeEntry.kt       — Room entity + unit/constant definitions
+        │   ├── BarcodeDao.kt         — Room DAO (barcodes table)
+        │   ├── BarcodeDatabase.kt    — Room database + migrations
+        │   ├── PricelistEntry.kt     — Room entity (pricelist table)
+        │   ├── PricelistDao.kt       — Room DAO (pricelist table)
+        │   └── PricelistRepository.kt — CSV seed + barcode lookup
         └── res/
             ├── values/strings.xml
             ├── values/themes.xml
