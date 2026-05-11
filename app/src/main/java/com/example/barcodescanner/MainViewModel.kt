@@ -5,10 +5,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,6 +47,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val entries: StateFlow<List<BarcodeEntry>> = dao.getAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    val filteredEntries: StateFlow<List<BarcodeEntry>> = combine(entries, _searchQuery) { list, query ->
+        if (query.isBlank()) list
+        else {
+            val q = query.trim().lowercase()
+            list.filter { e ->
+                e.value.lowercase().contains(q) ||
+                e.productName?.lowercase()?.contains(q) == true ||
+                e.productSize?.lowercase()?.contains(q) == true
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun setSearch(query: String) { _searchQuery.value = query }
 
     private val _events = MutableSharedFlow<ScanEvent>(extraBufferCapacity = 4)
     val events: SharedFlow<ScanEvent> = _events.asSharedFlow()
